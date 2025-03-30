@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+sqlalchemy
+databases[sqlite]
+pytesseract
+pillow
+httpx
+python-jose[cryptography]
+passlib[bcrypt]
+transformers
+torch
+pdf2image
+PyMuPDF
+python-multipart
