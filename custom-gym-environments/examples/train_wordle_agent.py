@@ -1,6 +1,7 @@
 import gymnasium as gym
 from stable_baselines3 import DQN
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common import utils
 import os
 import sys
 import time
@@ -15,7 +16,7 @@ def train_dqn_with_rendering():
     
     # Create single environment with human rendering
     base_env = WordleEnv(render_mode="human")
-    env = WordleActionWrapper(base_env)  # Add this wrapper!
+    env = WordleActionWrapper(base_env)
     env = Monitor(env, "./logs/wordle_dqn")
     
     # Create DQN model
@@ -36,12 +37,17 @@ def train_dqn_with_rendering():
         exploration_final_eps=0.1,
         verbose=1
     )
+
+    # Add this before your training loop starts (after creating the model):
+    if not hasattr(model, '_logger') or model._logger is None:
+        
+        model._logger = utils.configure_logger(model.verbose, model.tensorboard_log, "manual_train", False)    
     
     print("Starting DQN training with human rendering...")
     print("You'll see every game the agent plays!")
     
     # Training loop
-    total_timesteps = 30000  # Reduced for visual training
+    total_timesteps = 30000
     timestep = 0
     episode = 0
     
@@ -57,11 +63,12 @@ def train_dqn_with_rendering():
             if len(valid_actions) == 0:
                 obs, info = env.reset()
                 episode += 1
+                print(f"\n=== Episode {episode + 1} ===")
+                print(f"Target: {info['target_word']}")
                 continue
             
             # Get action from model
             if timestep < model.learning_starts or np.random.random() < model.exploration_rate:
-                # Random exploration from valid actions
                 valid_word = np.random.choice(valid_actions)
                 action = env.reverse_action(valid_word)
             else:
@@ -76,18 +83,33 @@ def train_dqn_with_rendering():
             
             # Take step
             new_obs, reward, terminated, truncated, info = env.step(action)
+
+            # Add transition to replay buffer (with proper variable order)
+            # model.replay_buffer.add(
+            #     obs,                      # Previous observation (dict)
+            #     action,                   # Action taken (integer)
+            #     reward,                   # Reward received (float)
+            #     new_obs,                  # New observation (dict)
+            #     terminated or truncated,  # Done flag (boolean)
+            #     [{}]                     # Info (list of dicts)
+            # )
             
             # Render and show result
             env.render()
             print(f"Reward: {reward}")
             
-            # time.sleep(1.0)  # Pause to see result
+            # time.sleep(0.5)  # Pause to see result
             timestep += 1
             
-            # Train model
-            if timestep > model.learning_starts and timestep % model.train_freq.frequency == 0:
-                model.learn(total_timesteps=1, reset_num_timesteps=False, log_interval=None)
-            
+            # **KEY FIX**: Only train when environment is NOT done
+            if (timestep > model.learning_starts and 
+                timestep % model.train_freq.frequency == 0 and 
+                not terminated and not truncated and
+                model.replay_buffer.size() >= model.batch_size):  # ← Add this check
+                
+                    model._update_current_progress_remaining(timestep, total_timesteps)
+                    model.train(gradient_steps=1, batch_size=model.batch_size)
+                        
             if terminated or truncated:
                 episode += 1
                 won = info.get('won', False)
@@ -96,8 +118,9 @@ def train_dqn_with_rendering():
                 print(f"\nEpisode {episode}: {'🎉 WON' if won else '😞 LOST'} in {guesses} guesses")
                 print("-" * 50)
                 
-                # time.sleep(2.0)  # Pause between episodes
+                # time.sleep(1.5)  # Pause between episodes
                 
+                # Reset for next episode
                 obs, info = env.reset()
                 print(f"\n=== Episode {episode + 1} ===")
                 print(f"Target: {info['target_word']}")
@@ -113,6 +136,7 @@ def train_dqn_with_rendering():
     print(f"\nTraining complete! Model saved after {episode} episodes")
     
     return model
+
 
 if __name__ == "__main__":
     # Create log directory
