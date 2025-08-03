@@ -159,7 +159,25 @@ if __name__ == "__main__":
         
         for step in range(6):
             action, _ = model.predict(obs, deterministic=True)
+            
+            # Convert numpy array to int if needed
+            if isinstance(action, np.ndarray):
+                action = int(action.item())
+            
+            # ✅ FIX: Ensure we don't repeat guesses
             guess_word = test_env.action(action)
+            
+            # Check if this word was already guessed
+            if guess_word in obs.get('guessed_words', []):
+                # Find a valid alternative
+                valid_actions = test_env.env.get_valid_actions()
+                if valid_actions:
+                    guess_word = valid_actions[0]  # Pick first available
+                    action = test_env.reverse_action(guess_word)
+                else:
+                    print("No more valid actions available!")
+                    break
+            
             print(f"Trained agent guesses: '{guess_word}'")
             
             obs, reward, terminated, truncated, info = test_env.step(action)
