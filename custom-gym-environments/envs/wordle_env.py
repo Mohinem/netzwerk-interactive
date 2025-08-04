@@ -201,52 +201,58 @@ class WordleEnv(gym.Env):
             raise ValueError(f"Invalid guess string '{action}'. Must contain only letters")
         
         # Optional: Validate that it's a real word from our word list
-        # Comment out if you want to allow any 5-letter combination
         if guess not in self.word_list:
-            # Give a small penalty for invalid words but don't end the game
+            # Give a penalty for invalid words but don't end the game
             reward = -2
             observation = self._get_observation()
             info = {
                 'guess': guess,
                 'target_word': self.target_word,
                 'won': self.won,
-                'guess_count': np.array([self.guess_count], dtype=np.int8),  # Array with 1 element
+                'guess_count': self.guess_count,
                 'valid_word': False
             }
             return observation, reward, False, False, info
         
-        # Check if word was already guessed
-        reward = 0
+        # Check if word was already guessed (repeat penalty)
         if guess in self.guessed_words:
-            reward = -5  # Penalty for repeat guess
-        else:
-            # Add to guessed words
-            self.guessed_words.add(guess)
-            
-            # Update board with the guess
-            self.board[self.guess_count] = self._word_to_array(guess)
-            
-            # Calculate and store feedback
-            feedback = self._get_feedback(guess, self.target_word)
-            self.feedback_board[self.guess_count] = feedback
-            
-            # Calculate reward based on feedback
-            if np.all(feedback == 2):  # All green - correct guess
-                self.won = True
-                self.game_over = True
-                reward = 100  # Big reward for winning
-            else:
-                # Reward based on information gained
-                green_count = np.sum(feedback == 2)
-                yellow_count = np.sum(feedback == 1)
-                reward = green_count * 10 + yellow_count * 5 - 1  # Small penalty per guess
-            
-            self.guess_count += 1
-            
-            # Check if out of guesses
-            if self.guess_count >= self.MAX_GUESSES and not self.won:
-                self.game_over = True
-                reward = -50  # Penalty for losing
+            reward = -5  # Strong penalty for repeat guess
+            observation = self._get_observation()
+            info = {
+                'guess': guess,
+                'target_word': self.target_word,
+                'won': self.won,
+                'guess_count': self.guess_count,
+                'valid_word': True,
+                'repeated_guess': True
+            }
+            return observation, reward, False, False, info
+        
+        # Add to guessed words
+        self.guessed_words.add(guess)
+        
+        # Update board with the guess
+        self.board[self.guess_count] = self._word_to_array(guess)
+        
+        # Calculate and store feedback
+        feedback = self._get_feedback(guess, self.target_word)
+        self.feedback_board[self.guess_count] = feedback
+        
+        # Increment guess count for reward calculation
+        self.guess_count += 1
+        
+        # 🎯 NEW ENHANCED REWARD SYSTEM
+        reward = self._calculate_enhanced_reward(guess, feedback, self.guess_count)
+        
+        # Check win condition
+        if np.all(feedback == 2):  # All green - correct guess
+            self.won = True
+            self.game_over = True
+        
+        # Check if out of guesses
+        if self.guess_count >= self.MAX_GUESSES and not self.won:
+            self.game_over = True
+            # Failure penalty is already included in _calculate_enhanced_reward
         
         observation = self._get_observation()
         terminated = self.game_over
@@ -256,10 +262,88 @@ class WordleEnv(gym.Env):
             'target_word': self.target_word,
             'won': self.won,
             'guess_count': self.guess_count,
-            'valid_word': True
+            'valid_word': True,
+            'green_count': int(np.sum(feedback == 2)),
+            'yellow_count': int(np.sum(feedback == 1)),
+            'gray_count': int(np.sum(feedback == 0))
         }
         
         return observation, reward, terminated, truncated, info
+
+    def _calculate_enhanced_reward(self, guess: str, feedback: np.ndarray, guess_number: int) -> float:
+        """
+        Calculate reward using the enhanced Wordle-specific reward structure
+        
+        Args:
+            guess: The word that was guessed
+            feedback: Feedback array (0=gray, 1=yellow, 2=green)
+            guess_number: Which guess attempt this is (1-6)
+        
+        Returns:
+            Float reward value
+        """
+        green_count = int(np.sum(feedback == 2))
+        yellow_count = int(np.sum(feedback == 1))
+        
+        # Check if this is a winning guess (all greens)
+        if green_count == self.WORD_LENGTH:
+            # Win rewards decrease with attempt number (refined scale)
+            win_rewards = {
+                1: 50,  # Exceptional
+                2: 35,  # Excellent  
+                3: 25,  # Very good
+                4: 15,  # Good
+                5: 8,   # Acceptable
+                6: 3    # Barely acceptable
+            }
+            base_win_reward = win_rewards.get(guess_number, 3)
+            
+            # Step cost for this guess
+            step_cost = -1
+            
+            return base_win_reward + step_cost
+        
+        # Check if game is over without winning (failure)
+        if guess_number >= self.MAX_GUESSES:
+            return -30  # Significant failure penalty
+        
+        # Calculate intermediate rewards for partial progress
+        base_reward = 0
+        
+        # Green letters (correct position) - enhanced with early bonus
+        if green_count > 0:
+            green_bonus = max(0, 4 - guess_number)  # Earlier greens worth more
+            base_reward += green_count * (2 + green_bonus)
+        
+        # Yellow letters (correct letter, wrong position)
+        base_reward += yellow_count * 1
+        
+        # Step cost (encourages efficiency)
+        step_cost = -1
+        
+        # Optional: Bonus for strategic first guesses with common letters
+        if guess_number == 1 and self._has_common_letters(guess):
+            base_reward += 1
+        
+        return base_reward + step_cost
+
+    def _has_common_letters(self, word: str) -> bool:
+        """
+        Check if word contains common English letters for strategic opening
+        
+        Args:
+            word: The guessed word
+            
+        Returns:
+            True if word contains mostly common letters
+        """
+        # Common letters in English (and good for Wordle strategy)
+        common_letters = set('AEIOURTNLSDH')
+        word_letters = set(word)
+        
+        # Return True if at least 3 letters are common
+        return len(word_letters.intersection(common_letters)) >= 3
+
     
     def _get_observation(self) -> Dict:
         """Get current observation"""
@@ -272,9 +356,103 @@ class WordleEnv(gym.Env):
         return {
             'board': self.board.copy(),
             'feedback': self.feedback_board.copy(),
-            'guess_count': np.array([self.guess_count], dtype=np.int8),
-            'guessed_words': guessed_mask
+            'guess_count': np.array([self.guess_count], dtype=np.int8),  # ← Must be array!
+            'guessed_words': guessed_mask  # ← Must be array!
         }
+    
+    def _get_enhanced_observation(self) -> Dict:
+        """Enhanced observation with explicit constraints"""
+        base_obs = self._get_observation()
+        
+        # Add explicit constraint tracking
+        constraints = self._get_letter_constraints()
+        
+        enhanced_obs = {
+            **base_obs,
+            'known_positions': constraints['known_positions'],
+            'known_letters': constraints['known_letters'],
+            'eliminated_letters': constraints['eliminated_letters'],
+            'position_constraints': constraints['position_constraints']
+        }
+        
+        return enhanced_obs
+
+    def get_valid_strategic_actions(self):
+        """Get valid words that respect discovered constraints"""
+        if self.guess_count == 0:
+            return self.word_list  # First guess - all words valid
+        
+        constraints = self._get_letter_constraints()
+        valid_words = []
+        
+        for word in self.word_list:
+            if word in self.guessed_words:
+                continue  # Skip already guessed words
+                
+            # Check if word violates constraints
+            word_valid = True
+            word_array = self._word_to_array(word)
+            
+            for pos in range(5):
+                letter_num = word_array[pos]
+                
+                # Must use known green letters in correct positions
+                if constraints['known_positions'][pos] != -1:
+                    if constraints['known_positions'][pos] != letter_num:
+                        word_valid = False
+                        break
+                
+                # Can't use eliminated letters
+                if constraints['eliminated_letters'][letter_num] == 1:
+                    word_valid = False
+                    break
+                
+                # Can't put yellow letters in known wrong positions
+                if constraints['position_constraints'][pos][letter_num] == 0:
+                    word_valid = False
+                    break
+            
+            # Must include all known letters (yellow/green)
+            if word_valid:
+                for letter_num in range(26):
+                    if constraints['known_letters'][letter_num] == 1:
+                        if letter_num not in word_array:
+                            word_valid = False
+                            break
+            
+            if word_valid:
+                valid_words.append(word)
+        
+        return valid_words if valid_words else self.get_valid_actions() 
+
+    def _get_letter_constraints(self):
+        """Extract strategic constraints from game state"""
+        known_positions = np.full(5, -1, dtype=np.int8)
+        known_letters = np.zeros(26, dtype=np.int8)
+        eliminated_letters = np.zeros(26, dtype=np.int8)
+        position_constraints = np.ones((5, 26), dtype=np.int8)
+        
+        for guess_idx in range(self.guess_count):
+            guess_letters = self.board[guess_idx]
+            feedback = self.feedback_board[guess_idx]
+            
+            for pos in range(5):
+                letter = guess_letters[pos]
+                if feedback[pos] == 2:  # Green - correct position
+                    known_positions[pos] = letter
+                    known_letters[letter] = 1
+                elif feedback[pos] == 1:  # Yellow - wrong position
+                    known_letters[letter] = 1
+                    position_constraints[pos][letter] = 0
+                else:  # Gray - not in word
+                    eliminated_letters[letter] = 1
+        
+        return {
+            'known_positions': known_positions,
+            'known_letters': known_letters,
+            'eliminated_letters': eliminated_letters,
+            'position_constraints': position_constraints
+        }    
     
     def get_valid_actions(self) -> List[str]:
         """Return list of valid actions (words that haven't been guessed yet)"""
@@ -331,7 +509,15 @@ class WordleActionWrapper(gym.ActionWrapper):
     
     def action(self, action):
         """Convert discrete action to string"""
-        if isinstance(action, (int, np.integer)):  # ✅ Handle both int and numpy.int64
+        # Handle numpy arrays with single elements
+        if isinstance(action, np.ndarray):
+            if action.shape == (1,) or action.shape == ():
+                action = int(action.item())  # Extract scalar from array
+            else:
+                raise ValueError(f"Expected scalar action, got array with shape {action.shape}")
+        
+        # Handle regular integers (including numpy integers)
+        if isinstance(action, (int, np.integer)):
             if 0 <= action < len(self.env.word_list):
                 return self.env.word_list[action]
             else:
